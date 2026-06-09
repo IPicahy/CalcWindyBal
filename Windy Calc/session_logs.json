@@ -1,0 +1,10 @@
+[
+    {
+        "distance": 1000.0,
+        "zero_dist": 100.0,
+        "delta_h": 25.0,
+        "weapon": "M40A5 (.308 Win / M61)",
+        "description": "Дом",
+        "base_azimuth": 186.0
+    }
+]
