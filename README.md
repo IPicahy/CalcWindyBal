@@ -1,3 +1,5 @@
+# CalcWindyBal — тактический баллистический калькулятор на Python для ARMA REFORGER
+
 # Вот ссылка на саму программу в Гугл диске
 https://drive.google.com/file/d/1IW9CJ4y6xJLoq4RQFAzF82GaGUWXJbWy/view?usp=sharing
 
