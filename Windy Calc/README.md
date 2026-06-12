@@ -9,7 +9,7 @@
 1. Установите Python (не ниже 3.8).
 2. Установите зависимость:
 ```bash 
-pip install customtkinter=
+pip install customtkinter
 ```
       
 ## Архитектура и основной функционал
