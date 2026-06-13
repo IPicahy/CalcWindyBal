@@ -22,9 +22,10 @@ CREATE_NEW_STR = "[Создать новый профиль]"
 
 # Класс всплывающих подсказок с таймером
 class ToolTip:
-    def __init__(self, widget, text):
+    def __init__(self, widget, text, delay=500):
         self.widget = widget
         self.text = text
+        self.delay = delay
         self.tw = None
         self.timer = None
         self.widget.bind("<Enter>", self.enter)
@@ -53,7 +54,10 @@ class ToolTip:
             label.pack()
 
     def leave(self, event=None):
-        self.timer = self.widget.after(500, self.close)
+        if self.delay > 0:
+            self.timer = self.widget.after(self.delay, self.close)
+        else:
+            self.close()
 
     def close(self):
         if self.tw:
@@ -99,14 +103,15 @@ DEFAULT_PROFILES = {
 
 PROFILES_FILE = "profiles.json"
 SESSION_LOGS_FILE = "session_logs.json"
+SESSION_WIND_FILE = "session_wind.json"
 
 
 class UniversalBallisticStation:
     def __init__(self, root):
         self.root = root
         self.root.title("Баллистическая Станция")
-        self.root.geometry("1000x950")
-        self.root.minsize(950, 850)
+        self.root.geometry("1400x900")
+        self.root.minsize(1200, 800)
         self.root.configure(fg_color=COLOR_BG)
         self.root.after(10, self.set_title_bar_color)
 
@@ -127,30 +132,50 @@ class UniversalBallisticStation:
 
         self.profiles = self.load_profiles()
         self.logs = self.load_logs()
+        wind_state = self.load_wind_state()
+        self.initial_wind_tab = wind_state.get("tab", "Метеостанция")
 
-        initial_weapon = list(self.profiles.keys())[0] if self.profiles else ""
-        initial_azimuth = str(self.logs[0].get("base_azimuth", "186")) if self.logs else "186"
+        # Загрузка последнего использованного профиля
+        saved_weapon = wind_state.get("last_weapon", "")
+        if saved_weapon in self.profiles:
+            initial_weapon = saved_weapon
+        else:
+            initial_weapon = list(self.profiles.keys())[0] if self.profiles else ""
+
+        initial_azimuth = str(self.logs[0].get("azimuth", "0")) if self.logs else "0"
 
         self.var_weapon = ctk.StringVar(value=initial_weapon)
         self.var_zero = ctk.StringVar(value="100")
         self.var_dist = ctk.StringVar(value="1000")
+        self.var_shoot_dir = ctk.StringVar(value=initial_azimuth)  # Азимут на цель
+
         self.var_delta_h = ctk.StringVar(value="0")
         self.var_shooter_h = ctk.StringVar(value="0")
         self.var_target_h = ctk.StringVar(value="0")
         self.var_target_desc = ctk.StringVar(value="")
 
-        self.var_shoot_dir = ctk.StringVar(value=initial_azimuth)
-        self.var_wind_speed = ctk.StringVar(value="0")
-        self.var_wind_dir = ctk.StringVar(value="105")
+        # Восстанавливаем данные о ветре
+        self.var_wind_speed = ctk.StringVar(value=wind_state.get("wind_speed", "0"))
+        self.var_wind_dir = ctk.StringVar(value=wind_state.get("wind_dir", "105"))
 
-        self.var_crosswind = ctk.StringVar(value="0")
-        self.var_cross_dir = ctk.StringVar(value="СЛЕВА →")
+        self.var_crosswind = ctk.StringVar(value=wind_state.get("crosswind", "0"))
+        self.var_cross_dir = ctk.StringVar(value=wind_state.get("cross_dir", "СЛЕВА →"))
 
         self.var_kac_total = ctk.StringVar(value="0")
-        self.var_kac_cross = ctk.StringVar(value="0")
-        self.var_kac_cross_dir = ctk.StringVar(value="<< Сносит ВЛЕВО")
-        self.var_kac_head = ctk.StringVar(value="0")
-        self.var_kac_head_dir = ctk.StringVar(value="↑ Встречный (В лицо)")
+        self.var_kac_cross = ctk.StringVar(value=wind_state.get("kac_cross", "0"))
+        self.var_kac_cross_dir = ctk.StringVar(value=wind_state.get("kac_cross_dir", "<< Сносит ВЛЕВО"))
+        self.var_kac_head = ctk.StringVar(value=wind_state.get("kac_head", "0"))
+        self.var_kac_head_dir = ctk.StringVar(value=wind_state.get("kac_head_dir", "↑ Встречный (В лицо)"))
+
+        # === ОТСЛЕЖИВАНИЕ ИЗМЕНЕНИЙ ВЕТРА ===
+        self.var_wind_speed.trace_add("write", self.on_wind_change)
+        self.var_wind_dir.trace_add("write", self.on_wind_change)
+        self.var_crosswind.trace_add("write", self.on_wind_change)
+        self.var_cross_dir.trace_add("write", self.on_wind_change)
+        self.var_kac_cross.trace_add("write", self.on_wind_change)
+        self.var_kac_cross_dir.trace_add("write", self.on_wind_change)
+        self.var_kac_head.trace_add("write", self.on_wind_change)
+        self.var_kac_head_dir.trace_add("write", self.on_wind_change)
 
         # Сетевые переменные
         self.net_role = ctk.StringVar(value="Одиночка (Сеть выкл)")
@@ -161,26 +186,87 @@ class UniversalBallisticStation:
         self.hud_toplevel = None
         self.hud_label = None
 
-        self.var_delete_target = ctk.StringVar(value="Нет целей")
+        self.var_selected_target = ctk.StringVar(value="Нет целей")
 
-        ctk.CTkLabel(self.root, text="Тактический Калькулятор", font=self.font_title, text_color=COLOR_TEXT).pack(
-            pady=(15, 10))
+        # --- ГЛОБАЛЬНАЯ РАЗМЕТКА ОКНА ---
+        ctk.CTkLabel(self.root, text="Тактический Калькулятор", font=self.font_title, text_color=COLOR_TEXT).grid(row=0,
+                                                                                                                  column=0,
+                                                                                                                  columnspan=2,
+                                                                                                                  pady=(
+                                                                                                                  15,
+                                                                                                                  10))
 
+        self.root.grid_columnconfigure(0, weight=6)  # Левая панель с вкладками
+        self.root.grid_columnconfigure(1, weight=4)  # Правая панель с логами
+        self.root.grid_rowconfigure(1, weight=1)
+
+        # Левая часть - Вкладки
         self.main_tabs = ctk.CTkTabview(
             self.root, fg_color=COLOR_BG, segmented_button_fg_color=COLOR_CARD,
             segmented_button_selected_color=COLOR_BORDER, segmented_button_selected_hover_color=COLOR_BORDER,
             segmented_button_unselected_color=COLOR_CARD, segmented_button_unselected_hover_color=COLOR_BG,
             text_color=COLOR_TEXT
         )
-        self.main_tabs.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+        self.main_tabs.grid(row=1, column=0, sticky="nsew", padx=(20, 10), pady=(0, 20))
 
         self.tab_calc = self.main_tabs.add("Калькулятор")
         self.tab_calib = self.main_tabs.add("Авто-Калибровка")
         self.tab_edit = self.main_tabs.add("Редактор оружия")
 
+        # Правая часть - Логи
+        self.log_container = ctk.CTkFrame(self.root, fg_color=COLOR_BG)
+        self.log_container.grid(row=1, column=1, sticky="nsew", padx=(10, 20), pady=(0, 20))
+        self.log_container.grid_rowconfigure(1, weight=1)
+        self.log_container.grid_columnconfigure(0, weight=1)
+
+        log_top_bar = ctk.CTkFrame(self.log_container, fg_color="transparent")
+        log_top_bar.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+
+        ctk.CTkLabel(log_top_bar, text="Список целей (Логи):", font=self.font_title, text_color=COLOR_TEXT).pack(
+            side="left")
+
+        btn_action_frame = ctk.CTkFrame(log_top_bar, fg_color="transparent")
+        btn_action_frame.pack(side="right")
+
+        self.btn_export = ctk.CTkButton(btn_action_frame, text="📋 Копировать", height=30, width=100, fg_color=COLOR_BG,
+                                        hover_color=COLOR_BORDER, border_width=2, border_color=COLOR_BORDER,
+                                        text_color=COLOR_TEXT,
+                                        font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+                                        command=self.export_logs_to_clipboard)
+        self.btn_export.pack(side="left", padx=2)
+        ToolTip(self.btn_export, "Скопировать все цели в буфер обмена\nдля передачи напарнику.", delay=0)
+
+        self.btn_import = ctk.CTkButton(btn_action_frame, text="📥 Вставить", height=30, width=100, fg_color=COLOR_BG,
+                                        hover_color=COLOR_BORDER, border_width=2, border_color=COLOR_BORDER,
+                                        text_color=COLOR_TEXT,
+                                        font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+                                        command=self.import_logs_from_clipboard)
+        self.btn_import.pack(side="left", padx=2)
+        ToolTip(self.btn_import, "Добавить цели из текста в буфере обмена,\nкоторый прислал напарник.", delay=0)
+
+        self.btn_clear = ctk.CTkButton(btn_action_frame, text="🗑 Стереть", height=30, width=90, fg_color=COLOR_CARD,
+                                       hover_color=COLOR_BORDER, border_width=2, border_color=COLOR_BORDER,
+                                       text_color=COLOR_TEXT,
+                                       font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+                                       command=self.clear_logs)
+        self.btn_clear.pack(side="left", padx=2)
+        ToolTip(self.btn_clear, "Полностью очистить список ваших целей.", delay=0)
+
+        self.result_frame = ctk.CTkFrame(self.log_container, corner_radius=10, border_width=2,
+                                         border_color=COLOR_BORDER, fg_color=COLOR_BG)
+        self.result_frame.grid(row=1, column=0, sticky="nsew")
+
+        self.result_textbox = ctk.CTkTextbox(self.result_frame, font=self.font_result, text_color=COLOR_TEXT,
+                                             fg_color=COLOR_BG, wrap="word")
+        self.result_textbox.pack(fill="both", expand=True, padx=15, pady=15)
+
+        # Сборка вкладок
         self.build_calc_tab()
         self.build_calib_tab()
         self.build_editor_tab()
+
+        self.render_existing_logs()
+        self.root.bind('<Return>', lambda event: self.calculate())
 
     def paste_clipboard(self, event=None):
         try:
@@ -226,6 +312,38 @@ class UniversalBallisticStation:
         with open(SESSION_LOGS_FILE, "w", encoding="utf-8") as f:
             json.dump(logs, f, ensure_ascii=False, indent=4)
 
+    def load_wind_state(self):
+        """Загрузка глобальных параметров ветра из файла"""
+        if os.path.exists(SESSION_WIND_FILE):
+            try:
+                with open(SESSION_WIND_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                return {}
+        return {}
+
+    def save_wind_state(self):
+        """Сохранение глобальных параметров ветра и настроек сессии в файл"""
+        try:
+            tab = self.wind_tabs.get() if hasattr(self, 'wind_tabs') else "Метеостанция"
+            weapon = self.var_weapon.get() if hasattr(self, 'var_weapon') else ""
+            state = {
+                "last_weapon": weapon,
+                "tab": tab,
+                "wind_speed": self.var_wind_speed.get(),
+                "wind_dir": self.var_wind_dir.get(),
+                "crosswind": self.var_crosswind.get(),
+                "cross_dir": self.var_cross_dir.get(),
+                "kac_cross": self.var_kac_cross.get(),
+                "kac_cross_dir": self.var_kac_cross_dir.get(),
+                "kac_head": self.var_kac_head.get(),
+                "kac_head_dir": self.var_kac_head_dir.get()
+            }
+            with open(SESSION_WIND_FILE, "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False, indent=4)
+        except Exception:
+            pass
+
     def angle_diff(self, a, b):
         diff = abs(a - b) % 360
         return 360 - diff if diff > 180 else diff
@@ -244,6 +362,62 @@ class UniversalBallisticStation:
                 self.edit_weapon_var.set(profile_list[0])
                 self.load_profile_into_editor(profile_list[0])
 
+    def on_weapon_change(self, choice):
+        """Метод вызывается при переключении профиля оружия в выпадающем списке"""
+        self.save_wind_state()  # Сохраняем последний выбранный профиль
+
+        logs = self.load_logs()
+        updated = False
+
+        # Обновляем профиль оружия во всех уже сохраненных целях
+        if logs:
+            for tgt in logs:
+                if tgt.get("weapon") != choice:
+                    tgt["weapon"] = choice
+                    updated = True
+
+        if updated:
+            self.save_logs(logs)
+
+        # Пытаемся запустить полный пересчет, чтобы обновить вывод и HUD
+        try:
+            dist_str = self.var_dist.get().replace(',', '.')
+            if dist_str and float(dist_str) > 0:
+                self.calculate()
+                return
+        except ValueError:
+            pass
+
+        # Если пересчет не сработал (например, пустая дистанция), но логи обновились - перерисовываем
+        if updated:
+            current_time = datetime.now().strftime("%H:%M:%S")
+            try:
+                wind_params = self.get_wind_params()
+                self.update_display(logs, wind_params, current_time)
+            except ValueError:
+                pass
+
+    def safe_float(self, val):
+        """Безопасная конвертация строки в число для риал-тайм ввода (игнорирует неполный ввод)"""
+        try:
+            if not val: return 0.0
+            s = str(val).strip().replace(',', '.')
+            if s in ['-', '.', '-.']: return 0.0
+            return float(s)
+        except ValueError:
+            return 0.0
+
+    def on_wind_change(self, *args):
+        """Автоматический пересчет при любом изменении параметров ветра"""
+        self.save_wind_state()  # Сохраняем состояние при любом изменении ветра
+        logs = self.load_logs()
+        if not logs:
+            return
+
+        current_time = datetime.now().strftime("%H:%M:%S")
+        wind_params = self.get_wind_params()
+        self.update_display(logs, wind_params, current_time)
+
     def sync_topo_tabs(self):
         self.cal_topo_tabs.set(self.topo_tabs.get())
 
@@ -252,9 +426,11 @@ class UniversalBallisticStation:
 
     def sync_wind_tabs(self):
         self.cal_wind_tabs.set(self.wind_tabs.get())
+        self.on_wind_change()
 
     def sync_wind_tabs_reverse(self):
         self.wind_tabs.set(self.cal_wind_tabs.get())
+        self.on_wind_change()
 
     def get_mil_from_table(self, dist, table):
         dists = sorted([float(k) for k in table.keys()])
@@ -388,17 +564,15 @@ class UniversalBallisticStation:
     # РЕНДЕР И ОБНОВЛЕНИЕ ДАННЫХ
     # ==========================================
     def get_wind_params(self):
-        shoot_dir_str = self.var_shoot_dir.get().replace(',', '.')
         return {
             "tab": self.wind_tabs.get(),
-            "shoot_dir": float(shoot_dir_str) if shoot_dir_str else 0.0,
-            "wind_speed": float(self.var_wind_speed.get().replace(',', '.') or 0),
-            "wind_dir": float(self.var_wind_dir.get().replace(',', '.') or 0),
-            "cw_speed": float(self.var_crosswind.get().replace(',', '.') or 0),
+            "wind_speed": self.safe_float(self.var_wind_speed.get()),
+            "wind_dir": self.safe_float(self.var_wind_dir.get()),
+            "cw_speed": self.safe_float(self.var_crosswind.get()),
             "cw_dir": self.var_cross_dir.get(),
-            "kac_cross": abs(float(self.var_kac_cross.get().replace(',', '.') or 0)),
+            "kac_cross": abs(self.safe_float(self.var_kac_cross.get())),
             "kac_cross_dir": self.var_kac_cross_dir.get(),
-            "kac_head": abs(float(self.var_kac_head.get().replace(',', '.') or 0)),
+            "kac_head": abs(self.safe_float(self.var_kac_head.get())),
             "kac_head_dir": self.var_kac_head_dir.get()
         }
 
@@ -421,12 +595,16 @@ class UniversalBallisticStation:
             final_output = res_str + "\n\n\n" + final_output
 
         if target_keys:
-            self.delete_dropdown.configure(values=target_keys, state="normal")
-            if self.var_delete_target.get() not in target_keys:
-                self.var_delete_target.set(target_keys[-1])  # Выбираем последнюю добавленную
+            self.target_dropdown.configure(values=target_keys, state="normal")
+            if hasattr(self, 'calib_target_dropdown'):
+                self.calib_target_dropdown.configure(values=target_keys, state="normal")
+            if self.var_selected_target.get() not in target_keys:
+                self.var_selected_target.set(target_keys[-1])  # Выбираем последнюю добавленную
         else:
-            self.delete_dropdown.configure(values=["Нет целей"], state="disabled")
-            self.var_delete_target.set("Нет целей")
+            self.target_dropdown.configure(values=["Нет целей"], state="disabled")
+            if hasattr(self, 'calib_target_dropdown'):
+                self.calib_target_dropdown.configure(values=["Нет целей"], state="disabled")
+            self.var_selected_target.set("Нет целей")
 
         final_output = f"Успешно загружено целей: {len(logs)}\n\n" + final_output
         self.set_result_text(final_output.strip())
@@ -436,8 +614,93 @@ class UniversalBallisticStation:
             display_text = "\n────────────────────────\n".join(hud_blocks)
             self.send_all_targets_via_net(display_text)
 
+    def load_specific_target(self):
+        sel = self.var_selected_target.get()
+        if not sel or sel == "Нет целей": return
+        try:
+            idx = int(sel.split('.')[0]) - 1
+            logs = self.load_logs()
+            if 0 <= idx < len(logs):
+                tgt = logs[idx]
+                self.var_dist.set(str(tgt.get("distance", "1000")))
+                self.var_zero.set(str(tgt.get("zero_dist", "100")))
+                self.var_delta_h.set(str(tgt.get("delta_h", "0")))
+                self.var_weapon.set(tgt.get("weapon", list(self.profiles.keys())[0]))
+                self.var_target_desc.set(tgt.get("description", ""))
+                self.var_shoot_dir.set(str(tgt.get("azimuth", "0")))
+
+                # Переключаемся на вкладку "Дальномер", так как мы загружаем напрямую delta_h
+                self.topo_tabs.set("Дальномер")
+                self.sync_topo_tabs()
+        except Exception:
+            pass
+
+    def update_specific_target(self):
+        sel = self.var_selected_target.get()
+        if not sel or sel == "Нет целей": return
+        try:
+            idx = int(sel.split('.')[0]) - 1
+            logs = self.load_logs()
+            if 0 <= idx < len(logs):
+                current_time = datetime.now().strftime("%H:%M:%S")
+
+                z_str = self.var_zero.get()
+                d_str = self.var_dist.get().replace(',', '.')
+                zero_dist = float(z_str)
+                distance = float(d_str) if d_str else 0.0
+
+                active_topo_tab = self.topo_tabs.get()
+                if active_topo_tab == "Дальномер":
+                    dh_str = self.var_delta_h.get().replace(',', '.')
+                    delta_h = float(dh_str) if dh_str else 0.0
+                else:
+                    sh_str = self.var_shooter_h.get().replace(',', '.')
+                    th_str = self.var_target_h.get().replace(',', '.')
+                    shooter_h = float(sh_str) if sh_str else 0.0
+                    target_h = float(th_str) if th_str else 0.0
+                    delta_h = target_h - shooter_h
+
+                if distance <= 0 or zero_dist <= 0:
+                    self.set_result_text("Ошибка:\nДистанции должны быть больше нуля.")
+                    return
+
+                selected_weapon = self.var_weapon.get()
+                if selected_weapon not in self.profiles:
+                    return
+
+                current_azimuth = self.safe_float(self.var_shoot_dir.get())
+                target_desc = self.var_target_desc.get().strip()
+
+                wind_params = self.get_wind_params()
+
+                # Обновляем данные конкретной цели
+                logs[idx]["distance"] = distance
+                logs[idx]["zero_dist"] = zero_dist
+                logs[idx]["delta_h"] = delta_h
+                logs[idx]["weapon"] = selected_weapon
+                logs[idx]["description"] = target_desc
+                logs[idx]["azimuth"] = current_azimuth
+
+                self.save_logs(logs)
+
+                # Обновляем UI
+                self.update_display(logs, wind_params, current_time)
+
+                # Восстанавливаем выбранную строку в dropdown после перерисовки
+                new_sel_prefix = f"{idx + 1}. "
+                new_values = self.target_dropdown.cget("values")
+                for v in new_values:
+                    if v.startswith(new_sel_prefix):
+                        self.var_selected_target.set(v)
+                        break
+
+        except ValueError:
+            self.set_result_text("Ошибка ввода!\nПроверьте, что в полях только цифры.")
+        except Exception:
+            pass
+
     def delete_specific_target(self):
-        sel = self.var_delete_target.get()
+        sel = self.var_selected_target.get()
         if not sel or sel == "Нет целей": return
 
         try:
@@ -461,9 +724,10 @@ class UniversalBallisticStation:
                                  fg_color=COLOR_CARD)
         top_frame.pack(fill="x", padx=10, pady=(5, 10))
 
-        top_frame.grid_columnconfigure(0, weight=5)
-        top_frame.grid_columnconfigure(1, weight=2)
-        top_frame.grid_columnconfigure(2, weight=2)
+        top_frame.grid_columnconfigure(0, weight=4)  # Профиль
+        top_frame.grid_columnconfigure(1, weight=2)  # Пристрелка
+        top_frame.grid_columnconfigure(2, weight=2)  # Дистанция
+        top_frame.grid_columnconfigure(3, weight=2)  # Азимут
 
         ctk.CTkLabel(top_frame, text="Профиль оружия:", text_color=COLOR_TEXT_MUTED,
                      font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold")).grid(row=0, column=0, sticky="w",
@@ -474,12 +738,17 @@ class UniversalBallisticStation:
         ctk.CTkLabel(top_frame, text="Дистанция (м):", text_color=COLOR_TEXT_MUTED,
                      font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold")).grid(row=0, column=2, sticky="w",
                                                                                        padx=15, pady=(10, 0))
+        # Добавляем Азимут на цель в верхнюю панель
+        ctk.CTkLabel(top_frame, text="Азимут на цель (°):", text_color=COLOR_TEXT_MUTED,
+                     font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold")).grid(row=0, column=3, sticky="w",
+                                                                                       padx=15, pady=(10, 0))
 
         self.dropdown_weapon = ctk.CTkOptionMenu(top_frame, values=list(self.profiles.keys()), variable=self.var_weapon,
                                                  height=35, fg_color=COLOR_BORDER, button_color=COLOR_CARD,
                                                  button_hover_color=COLOR_BG, text_color=COLOR_TEXT,
                                                  dropdown_fg_color=COLOR_CARD, dropdown_text_color=COLOR_TEXT,
-                                                 font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"))
+                                                 font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+                                                 command=self.on_weapon_change)
         self.dropdown_weapon.grid(row=1, column=0, sticky="ew", padx=15, pady=(5, 15))
 
         self.dropdown_zero = ctk.CTkOptionMenu(top_frame,
@@ -495,6 +764,10 @@ class UniversalBallisticStation:
         self.entry_dist = ctk.CTkEntry(top_frame, textvariable=self.var_dist, height=35, corner_radius=8,
                                        fg_color=COLOR_BG, border_color=COLOR_BORDER, text_color=COLOR_TEXT)
         self.entry_dist.grid(row=1, column=2, sticky="ew", padx=15, pady=(5, 15))
+
+        self.entry_azimuth = ctk.CTkEntry(top_frame, textvariable=self.var_shoot_dir, height=35, corner_radius=8,
+                                          fg_color=COLOR_BG, border_color=COLOR_BORDER, text_color=COLOR_TEXT)
+        self.entry_azimuth.grid(row=1, column=3, sticky="ew", padx=15, pady=(5, 15))
 
         mid_frame = ctk.CTkFrame(self.tab_calc, fg_color="transparent")
         mid_frame.pack(fill="x", padx=10, pady=5)
@@ -531,7 +804,7 @@ class UniversalBallisticStation:
                                                                                                              sticky="w",
                                                                                                              padx=10,
                                                                                                              pady=(
-                                                                                                             10, 0))
+                                                                                                                 10, 0))
         self.entry_shooter_h = ctk.CTkEntry(map_frame, textvariable=self.var_shooter_h, height=35, fg_color=COLOR_BG,
                                             border_color=COLOR_BORDER, text_color=COLOR_TEXT)
         self.entry_shooter_h.grid(row=1, column=0, sticky="ew", padx=10, pady=(5, 5))
@@ -558,6 +831,11 @@ class UniversalBallisticStation:
         self.wind_tabs.add("Метеостанция")
         self.wind_tabs.add("Вектор ветра")
         self.wind_tabs.add("Боковой")
+
+        try:
+            self.wind_tabs.set(self.initial_wind_tab)
+        except Exception:
+            pass
 
         kac_frame = self.wind_tabs.tab("Метеостанция")
         kac_frame.grid_columnconfigure((1, 2), weight=1)
@@ -587,81 +865,65 @@ class UniversalBallisticStation:
                                             font=ctk.CTkFont(weight="bold"))
         ToolTip(self.btn_q_tot_calc, "ДЛЯ КОРРЕКТИРОВЩИКА: Общая скорость\nОна НЕ НУЖНА для расчета выстрела.")
 
-        ctk.CTkLabel(kac_frame, text="Азимут (°):", text_color=COLOR_TEXT_MUTED, font=self.font_label).grid(row=2,
-                                                                                                            column=0,
-                                                                                                            sticky="w",
-                                                                                                            padx=5,
-                                                                                                            pady=(2, 2))
-        ctk.CTkEntry(kac_frame, textvariable=self.var_shoot_dir, height=26, fg_color=COLOR_BG,
-                     border_color=COLOR_BORDER, text_color=COLOR_TEXT).grid(row=2, column=1, columnspan=2, sticky="ew",
-                                                                            padx=5)
-
-        ctk.CTkLabel(kac_frame, text="Боковой (Cross):", text_color=COLOR_TEXT_MUTED, font=self.font_label).grid(row=3,
+        ctk.CTkLabel(kac_frame, text="Боковой (Cross):", text_color=COLOR_TEXT_MUTED, font=self.font_label).grid(row=2,
                                                                                                                  column=0,
                                                                                                                  sticky="w",
                                                                                                                  padx=5,
                                                                                                                  pady=(
-                                                                                                                 2, 2))
+                                                                                                                     2,
+                                                                                                                     2))
         ctk.CTkEntry(kac_frame, textvariable=self.var_kac_cross, width=60, height=26, fg_color=COLOR_BG,
-                     border_color=COLOR_BORDER, text_color=COLOR_TEXT).grid(row=3, column=1, sticky="w", padx=5)
+                     border_color=COLOR_BORDER, text_color=COLOR_TEXT).grid(row=2, column=1, sticky="w", padx=5)
         ctk.CTkOptionMenu(kac_frame, variable=self.var_kac_cross_dir, values=["<< Сносит ВЛЕВО", "Сносит ВПРАВО >>"],
-                          height=26, fg_color=COLOR_BORDER, button_color=COLOR_CARD, text_color=COLOR_TEXT).grid(row=3,
+                          height=26, fg_color=COLOR_BORDER, button_color=COLOR_CARD, text_color=COLOR_TEXT).grid(row=2,
                                                                                                                  column=2,
                                                                                                                  sticky="ew",
                                                                                                                  padx=5)
 
-        ctk.CTkLabel(kac_frame, text="Прямой (Head):", text_color=COLOR_TEXT_MUTED, font=self.font_label).grid(row=4,
+        ctk.CTkLabel(kac_frame, text="Прямой (Head):", text_color=COLOR_TEXT_MUTED, font=self.font_label).grid(row=3,
                                                                                                                column=0,
                                                                                                                sticky="w",
                                                                                                                padx=5,
                                                                                                                pady=(
-                                                                                                               2, 2))
+                                                                                                                   2,
+                                                                                                                   2))
         ctk.CTkEntry(kac_frame, textvariable=self.var_kac_head, width=60, height=26, fg_color=COLOR_BG,
-                     border_color=COLOR_BORDER, text_color=COLOR_TEXT).grid(row=4, column=1, sticky="w", padx=5)
+                     border_color=COLOR_BORDER, text_color=COLOR_TEXT).grid(row=3, column=1, sticky="w", padx=5)
         ctk.CTkOptionMenu(kac_frame, variable=self.var_kac_head_dir,
                           values=["↑ Встречный (В лицо)", "↓ Попутный (В спину)"], height=26, fg_color=COLOR_BORDER,
-                          button_color=COLOR_CARD, text_color=COLOR_TEXT).grid(row=4, column=2, sticky="ew", padx=5)
+                          button_color=COLOR_CARD, text_color=COLOR_TEXT).grid(row=3, column=2, sticky="ew", padx=5)
 
         wv_frame = self.wind_tabs.tab("Вектор ветра")
         wv_frame.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(wv_frame, text="Азимут стрельбы (°):", text_color=COLOR_TEXT_MUTED, font=self.font_label).grid(
-            row=0, column=0, sticky="w", padx=10)
-        self.entry_shoot_dir = ctk.CTkEntry(wv_frame, textvariable=self.var_shoot_dir, height=26, fg_color=COLOR_BG,
-                                            border_color=COLOR_BORDER, text_color=COLOR_TEXT).grid(row=1, column=0,
-                                                                                                   sticky="ew", padx=10,
-                                                                                                   pady=(0, 5))
         ctk.CTkLabel(wv_frame, text="Скорость ветра (м/с):", text_color=COLOR_TEXT_MUTED, font=self.font_label).grid(
-            row=2, column=0, sticky="w", padx=10)
+            row=0, column=0, sticky="w", padx=10)
         self.entry_wind_speed = ctk.CTkEntry(wv_frame, textvariable=self.var_wind_speed, height=26, fg_color=COLOR_BG,
-                                             border_color=COLOR_BORDER, text_color=COLOR_TEXT).grid(row=3, column=0,
+                                             border_color=COLOR_BORDER, text_color=COLOR_TEXT).grid(row=1, column=0,
                                                                                                     sticky="ew",
                                                                                                     padx=10,
                                                                                                     pady=(0, 5))
-        ctk.CTkLabel(wv_frame, text="Направление (ОТКУДА, °):", text_color=COLOR_TEXT_MUTED, font=self.font_label).grid(
-            row=4, column=0, sticky="w", padx=10)
+        ctk.CTkLabel(wv_frame, text="Направление ветра (ОТКУДА, °):", text_color=COLOR_TEXT_MUTED,
+                     font=self.font_label).grid(
+            row=2, column=0, sticky="w", padx=10)
         self.entry_wind_dir = ctk.CTkEntry(wv_frame, textvariable=self.var_wind_dir, height=26, fg_color=COLOR_BG,
-                                           border_color=COLOR_BORDER, text_color=COLOR_TEXT).grid(row=5, column=0,
+                                           border_color=COLOR_BORDER, text_color=COLOR_TEXT).grid(row=3, column=0,
                                                                                                   sticky="ew", padx=10,
                                                                                                   pady=(0, 5))
 
         bw_frame = self.wind_tabs.tab("Боковой")
         bw_frame.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(bw_frame, text="Азимут стрельбы (°):", text_color=COLOR_TEXT_MUTED, font=self.font_label).grid(
-            row=0, column=0, sticky="w", padx=10)
-        ctk.CTkEntry(bw_frame, textvariable=self.var_shoot_dir, height=26, fg_color=COLOR_BG, border_color=COLOR_BORDER,
-                     text_color=COLOR_TEXT).grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
         ctk.CTkLabel(bw_frame, text="Скорость сноса (м/с):", text_color=COLOR_TEXT_MUTED, font=self.font_label).grid(
-            row=2, column=0, sticky="w", padx=10)
+            row=0, column=0, sticky="w", padx=10)
         self.entry_crosswind = ctk.CTkEntry(bw_frame, textvariable=self.var_crosswind, height=26, fg_color=COLOR_BG,
-                                            border_color=COLOR_BORDER, text_color=COLOR_TEXT).grid(row=3, column=0,
+                                            border_color=COLOR_BORDER, text_color=COLOR_TEXT).grid(row=1, column=0,
                                                                                                    sticky="ew", padx=10,
                                                                                                    pady=(0, 10))
-        ctk.CTkLabel(bw_frame, text="Откуда дует ветер:", text_color=COLOR_TEXT_MUTED, font=self.font_label).grid(row=4,
+        ctk.CTkLabel(bw_frame, text="Откуда дует ветер:", text_color=COLOR_TEXT_MUTED, font=self.font_label).grid(row=2,
                                                                                                                   column=0,
                                                                                                                   sticky="w",
                                                                                                                   padx=10)
         rb_frame_calc = ctk.CTkFrame(bw_frame, fg_color="transparent")
-        rb_frame_calc.grid(row=5, column=0, sticky="ew", padx=10, pady=(0, 5))
+        rb_frame_calc.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 5))
         ctk.CTkRadioButton(rb_frame_calc, text="СЛЕВА →", variable=self.var_cross_dir, value="СЛЕВА →",
                            fg_color=COLOR_ACCENT, hover_color=COLOR_BORDER, text_color=COLOR_TEXT).pack(side="left",
                                                                                                         expand=True)
@@ -681,7 +943,7 @@ class UniversalBallisticStation:
         self.entry_desc.pack(fill="x", expand=True, padx=5)
 
         # -------------------------------------------------------------
-        # БЛОК ИНТЕРФЕЙСА ДЛЯ СЕТИ С НОВЫМ ДИЗАЙНОМ И АВТО-ОТПРАВКОЙ
+        # БЛОК ИНТЕРФЕЙСА ДЛЯ СЕТИ
         # -------------------------------------------------------------
         self.net_frame = ctk.CTkFrame(self.tab_calc, fg_color="transparent")
         self.net_frame.pack(fill="x", padx=10, pady=(5, 5))
@@ -713,56 +975,103 @@ class UniversalBallisticStation:
                                            font=ctk.CTkFont(weight="bold"))
         self.btn_clear_hud.pack(side="left", padx=15)
 
-        # Второй ряд: Удаление конкретной цели
+        # Второй ряд: Управление конкретной целью
         self.net_action_row = ctk.CTkFrame(self.net_frame, fg_color="transparent")
         self.net_action_row.pack(fill="x")
-        ctk.CTkLabel(self.net_action_row, text="Управление целями:", text_color=COLOR_TEXT_MUTED,
+        ctk.CTkLabel(self.net_action_row, text="Выбор цели:", text_color=COLOR_TEXT_MUTED,
                      font=self.font_label).pack(side="left", padx=5)
-        self.delete_dropdown = ctk.CTkOptionMenu(self.net_action_row, variable=self.var_delete_target,
-                                                 values=["Нет целей"], height=28, width=220, fg_color=COLOR_BORDER,
+        self.target_dropdown = ctk.CTkOptionMenu(self.net_action_row, variable=self.var_selected_target,
+                                                 values=["Нет целей"], height=28, width=180, fg_color=COLOR_BORDER,
                                                  button_color=COLOR_CARD, text_color=COLOR_TEXT, state="disabled")
-        self.delete_dropdown.pack(side="left", padx=5)
-        self.btn_delete_spec = ctk.CTkButton(self.net_action_row, text="🗑 Удалить цель", height=28,
+        self.target_dropdown.pack(side="left", padx=5)
+
+        self.btn_load_spec = ctk.CTkButton(self.net_action_row, text="📥 Ввести", height=28, width=80,
+                                           command=self.load_specific_target, fg_color=COLOR_BG, border_width=2,
+                                           border_color=COLOR_BORDER, hover_color=COLOR_BORDER, text_color=COLOR_TEXT,
+                                           font=ctk.CTkFont(weight="bold"))
+        self.btn_load_spec.pack(side="left", padx=2)
+        ToolTip(self.btn_load_spec, "Подгрузить параметры выбранной цели\nобратно в поля калькулятора.", delay=0)
+
+        self.btn_update_spec = ctk.CTkButton(self.net_action_row, text="💾 Перезаписать", height=28, width=110,
+                                             command=self.update_specific_target, fg_color=COLOR_BG, border_width=2,
+                                             border_color=COLOR_BORDER, hover_color=COLOR_BORDER, text_color=COLOR_TEXT,
+                                             font=ctk.CTkFont(weight="bold"))
+        self.btn_update_spec.pack(side="left", padx=2)
+        ToolTip(self.btn_update_spec, "Сохранить введенные изменения\nповерх выбранной цели.", delay=0)
+
+        self.btn_delete_spec = ctk.CTkButton(self.net_action_row, text="🗑 Удалить", height=28, width=80,
                                              command=self.delete_specific_target, fg_color=COLOR_BG, border_width=2,
                                              border_color=COLOR_BORDER, hover_color=COLOR_BORDER, text_color=COLOR_TEXT,
                                              font=ctk.CTkFont(weight="bold"))
-        self.btn_delete_spec.pack(side="left", padx=5)
+        self.btn_delete_spec.pack(side="left", padx=2)
+        ToolTip(self.btn_delete_spec, "Удалить выбранную цель из списка.", delay=0)
 
         self.toggle_network(self.net_role.get())
-        # -------------------------------------------------------------
 
         btn_frame_main = ctk.CTkFrame(self.tab_calc, fg_color="transparent")
         btn_frame_main.pack(fill="x", padx=10, pady=(5, 10))
 
-        self.btn_calc = ctk.CTkButton(btn_frame_main, text="Рассчитать вынос", height=45, fg_color=COLOR_ACCENT,
+        self.btn_calc = ctk.CTkButton(btn_frame_main, text="Сохранить цель и рассчитать", height=45,
+                                      fg_color=COLOR_ACCENT,
                                       hover_color=COLOR_BORDER, text_color=COLOR_BG,
                                       font=ctk.CTkFont(family="Segoe UI", size=18, weight="bold"), corner_radius=10,
                                       command=self.calculate)
-        self.btn_calc.pack(side="left", fill="x", expand=True, padx=(0, 5))
-
-        self.btn_clear = ctk.CTkButton(btn_frame_main, text="Стереть логи", height=45, fg_color=COLOR_BG,
-                                       hover_color=COLOR_BORDER, border_width=2, border_color=COLOR_BORDER,
-                                       text_color=COLOR_TEXT,
-                                       font=ctk.CTkFont(family="Segoe UI", size=15, weight="bold"), corner_radius=10,
-                                       command=self.clear_logs)
-        self.btn_clear.pack(side="right", fill="x", expand=False, padx=(5, 0))
-
-        self.result_frame = ctk.CTkFrame(self.tab_calc, corner_radius=10, border_width=2, border_color=COLOR_BORDER,
-                                         fg_color=COLOR_BG)
-        self.result_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-
-        self.result_textbox = ctk.CTkTextbox(self.result_frame, font=self.font_result, text_color=COLOR_TEXT,
-                                             fg_color=COLOR_BG, wrap="word")
-        self.result_textbox.pack(fill="both", expand=True, padx=15, pady=15)
-
-        self.render_existing_logs()
-        self.root.bind('<Return>', lambda event: self.calculate())
+        self.btn_calc.pack(fill="x", expand=True, padx=0)
+        ToolTip(self.btn_calc, "Добавить новые данные как новую цель\nи пересчитать всю баллистику.", delay=0)
 
     def set_result_text(self, text):
         self.result_textbox.configure(state="normal")
         self.result_textbox.delete("0.0", tk.END)
         self.result_textbox.insert("0.0", text)
         self.result_textbox.configure(state="disabled")
+
+    def export_logs_to_clipboard(self):
+        logs = self.load_logs()
+        if not logs:
+            self.btn_export.configure(text="Нет целей")
+            self.root.after(2000, lambda: self.btn_export.configure(text="📋 Копировать"))
+            return
+
+        export_str = json.dumps(logs, ensure_ascii=False)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(export_str)
+
+        self.btn_export.configure(text="Скопировано!")
+        self.root.after(2000, lambda: self.btn_export.configure(text="📋 Копировать"))
+
+    def import_logs_from_clipboard(self):
+        try:
+            clipboard_data = self.root.clipboard_get()
+            new_logs = json.loads(clipboard_data)
+
+            if not isinstance(new_logs, list):
+                raise ValueError("Данные не являются списком")
+
+            current_logs = self.load_logs()
+            added = False
+            for new_tgt in new_logs:
+                # Базовая проверка структуры цели
+                if isinstance(new_tgt, dict) and "distance" in new_tgt and "weapon" in new_tgt:
+                    # Добавляем только если такой цели еще нет в логах
+                    if new_tgt not in current_logs:
+                        current_logs.append(new_tgt)
+                        added = True
+
+            if added:
+                self.save_logs(current_logs)
+                current_time = datetime.now().strftime("%H:%M:%S")
+                wind_params = self.get_wind_params()
+                self.update_display(current_logs, wind_params, current_time)
+
+                self.btn_import.configure(text="Добавлено!", text_color="#2ECC71")
+            else:
+                self.btn_import.configure(text="Уже в списке")
+
+            self.root.after(2000, lambda: self.btn_import.configure(text="📥 Вставить", text_color=COLOR_TEXT))
+
+        except Exception:
+            self.btn_import.configure(text="Ошибка данных", text_color="#FF4C4C")
+            self.root.after(2000, lambda: self.btn_import.configure(text="📥 Вставить", text_color=COLOR_TEXT))
 
     def clear_logs(self):
         self.save_logs([])
@@ -795,13 +1104,8 @@ class UniversalBallisticStation:
             return
 
         current_time = datetime.now().strftime("%H:%M:%S")
-
-        try:
-            wind_params = self.get_wind_params()
-            self.update_display(logs, wind_params, current_time)
-        except ValueError:
-            self.set_result_text("Ошибка ввода ветра!\nПроверьте, что в полях только цифры.")
-            return
+        wind_params = self.get_wind_params()
+        self.update_display(logs, wind_params, current_time)
 
     # ВКЛАДКА 2: АВТО-КАЛИБРОВКА
     def build_calib_tab(self):
@@ -812,11 +1116,32 @@ class UniversalBallisticStation:
                            fg_color=COLOR_CARD)
         box.pack(fill="both", expand=True)
 
+        # --- ДОБАВЛЕНО: ВЫБОР ЦЕЛИ В КАЛИБРОВКЕ ---
+        calib_action_row = ctk.CTkFrame(box, fg_color="transparent")
+        calib_action_row.pack(fill="x", padx=10, pady=(10, 0))
+        ctk.CTkLabel(calib_action_row, text="Загрузить цель для калибровки:", text_color=COLOR_TEXT_MUTED,
+                     font=self.font_label).pack(side="left", padx=5)
+
+        self.calib_target_dropdown = ctk.CTkOptionMenu(calib_action_row, variable=self.var_selected_target,
+                                                       values=["Нет целей"], height=28, width=180,
+                                                       fg_color=COLOR_BORDER,
+                                                       button_color=COLOR_CARD, text_color=COLOR_TEXT, state="disabled")
+        self.calib_target_dropdown.pack(side="left", padx=5)
+
+        self.btn_load_calib_spec = ctk.CTkButton(calib_action_row, text="📥 Ввести", height=28, width=80,
+                                                 command=self.load_specific_target, fg_color=COLOR_BG, border_width=2,
+                                                 border_color=COLOR_BORDER, hover_color=COLOR_BORDER,
+                                                 text_color=COLOR_TEXT,
+                                                 font=ctk.CTkFont(weight="bold"))
+        self.btn_load_calib_spec.pack(side="left", padx=2)
+        ToolTip(self.btn_load_calib_spec, "Подгрузить параметры выбранной цели\nдля калибровки ветра.", delay=0)
+
         top_bar = ctk.CTkFrame(box, fg_color="transparent")
         top_bar.pack(fill="x", padx=10, pady=10)
         top_bar.grid_columnconfigure(0, weight=3)
         top_bar.grid_columnconfigure(1, weight=1)
         top_bar.grid_columnconfigure(2, weight=1)
+        top_bar.grid_columnconfigure(3, weight=1)
 
         ctk.CTkLabel(top_bar, text="Калибруемый профиль:", text_color=COLOR_TEXT_MUTED, font=self.font_label).grid(
             row=0, column=0, sticky="w", padx=10)
@@ -828,11 +1153,16 @@ class UniversalBallisticStation:
                                                                                                              column=2,
                                                                                                              sticky="w",
                                                                                                              padx=10)
+        ctk.CTkLabel(top_bar, text="Азимут (°):", text_color=COLOR_TEXT_MUTED, font=self.font_label).grid(row=0,
+                                                                                                          column=3,
+                                                                                                          sticky="w",
+                                                                                                          padx=10)
 
         self.calib_dropdown_weapon = ctk.CTkOptionMenu(top_bar, values=list(self.profiles.keys()),
                                                        variable=self.var_weapon, height=35, fg_color=COLOR_BORDER,
                                                        button_color=COLOR_BG, button_hover_color=COLOR_CARD,
-                                                       text_color=COLOR_TEXT)
+                                                       text_color=COLOR_TEXT,
+                                                       command=self.on_weapon_change)
         self.calib_dropdown_weapon.grid(row=1, column=0, sticky="ew", padx=10, pady=(5, 5))
 
         self.calib_dropdown_zero = ctk.CTkOptionMenu(top_bar,
@@ -848,6 +1178,9 @@ class UniversalBallisticStation:
 
         ctk.CTkEntry(top_bar, textvariable=self.var_dist, height=35, fg_color=COLOR_BG, border_color=COLOR_BORDER,
                      text_color=COLOR_TEXT).grid(row=1, column=2, sticky="ew", padx=10, pady=(5, 5))
+
+        ctk.CTkEntry(top_bar, textvariable=self.var_shoot_dir, height=35, fg_color=COLOR_BG, border_color=COLOR_BORDER,
+                     text_color=COLOR_TEXT).grid(row=1, column=3, sticky="ew", padx=10, pady=(5, 5))
 
         mid_frame = ctk.CTkFrame(box, fg_color="transparent")
         mid_frame.pack(fill="x", padx=10, pady=0)
@@ -894,6 +1227,11 @@ class UniversalBallisticStation:
         self.cal_wind_tabs.add("Вектор ветра")
         self.cal_wind_tabs.add("Боковой")
 
+        try:
+            self.cal_wind_tabs.set(self.initial_wind_tab)
+        except Exception:
+            pass
+
         kac_frame_c = self.cal_wind_tabs.tab("Метеостанция")
         kac_frame_c.grid_columnconfigure((1, 2), weight=1)
 
@@ -921,44 +1259,34 @@ class UniversalBallisticStation:
                                              text_color=COLOR_BORDER, hover_color=COLOR_CARD,
                                              font=ctk.CTkFont(weight="bold"))
 
-        ctk.CTkLabel(kac_frame_c, text="Азимут (°):", text_color=COLOR_TEXT_MUTED).grid(row=2, column=0, sticky="w",
-                                                                                        padx=5, pady=(2, 2))
-        ctk.CTkEntry(kac_frame_c, textvariable=self.var_shoot_dir, height=26, fg_color=COLOR_CARD).grid(row=2, column=1,
-                                                                                                        columnspan=2,
-                                                                                                        sticky="ew",
-                                                                                                        padx=5)
-        ctk.CTkLabel(kac_frame_c, text="Crosswind:", text_color=COLOR_TEXT_MUTED).grid(row=3, column=0, sticky="w",
+        ctk.CTkLabel(kac_frame_c, text="Crosswind:", text_color=COLOR_TEXT_MUTED).grid(row=2, column=0, sticky="w",
                                                                                        padx=5, pady=(2, 2))
-        ctk.CTkEntry(kac_frame_c, textvariable=self.var_kac_cross, width=40, height=26, fg_color=COLOR_CARD).grid(row=3,
+        ctk.CTkEntry(kac_frame_c, textvariable=self.var_kac_cross, width=40, height=26, fg_color=COLOR_CARD).grid(row=2,
                                                                                                                   column=1,
                                                                                                                   sticky="w",
                                                                                                                   padx=5)
         ctk.CTkOptionMenu(kac_frame_c, variable=self.var_kac_cross_dir, values=["<< Сносит ВЛЕВО", "Сносит ВПРАВО >>"],
-                          height=26, fg_color=COLOR_BORDER, button_color=COLOR_CARD, text_color=COLOR_TEXT).grid(row=3,
+                          height=26, fg_color=COLOR_BORDER, button_color=COLOR_CARD, text_color=COLOR_TEXT).grid(row=2,
                                                                                                                  column=2,
                                                                                                                  sticky="ew",
                                                                                                                  padx=5)
-        ctk.CTkLabel(kac_frame_c, text="Headwind:", text_color=COLOR_TEXT_MUTED).grid(row=4, column=0, sticky="w",
+        ctk.CTkLabel(kac_frame_c, text="Headwind:", text_color=COLOR_TEXT_MUTED).grid(row=3, column=0, sticky="w",
                                                                                       padx=5, pady=(2, 2))
-        ctk.CTkEntry(kac_frame_c, textvariable=self.var_kac_head, width=40, height=26, fg_color=COLOR_CARD).grid(row=4,
+        ctk.CTkEntry(kac_frame_c, textvariable=self.var_kac_head, width=40, height=26, fg_color=COLOR_CARD).grid(row=3,
                                                                                                                  column=1,
                                                                                                                  sticky="w",
                                                                                                                  padx=5)
         ctk.CTkOptionMenu(kac_frame_c, variable=self.var_kac_head_dir,
                           values=["↑ Встречный (В лицо)", "↓ Попутный (В спину)"], height=26, fg_color=COLOR_BORDER,
-                          button_color=COLOR_CARD, text_color=COLOR_TEXT).grid(row=4, column=2, sticky="ew", padx=5)
+                          button_color=COLOR_CARD, text_color=COLOR_TEXT).grid(row=3, column=2, sticky="ew", padx=5)
 
         wv_frame_c = self.cal_wind_tabs.tab("Вектор ветра")
         wv_frame_c.grid_columnconfigure(0, weight=1);
         wv_frame_c.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(wv_frame_c, text="Азимут (°):", text_color=COLOR_TEXT_MUTED).grid(row=0, column=0, sticky="w",
-                                                                                       padx=5)
-        ctk.CTkEntry(wv_frame_c, textvariable=self.var_shoot_dir, height=26, fg_color=COLOR_CARD).grid(row=1, column=0,
-                                                                                                       sticky="ew",
-                                                                                                       padx=5)
-        ctk.CTkLabel(wv_frame_c, text="Скор. (м/с):", text_color=COLOR_TEXT_MUTED).grid(row=2, column=0, sticky="w",
+
+        ctk.CTkLabel(wv_frame_c, text="Скор. (м/с):", text_color=COLOR_TEXT_MUTED).grid(row=0, column=0, sticky="w",
                                                                                         padx=5)
-        ctk.CTkEntry(wv_frame_c, textvariable=self.var_wind_speed, height=26, fg_color=COLOR_CARD).grid(row=3, column=0,
+        ctk.CTkEntry(wv_frame_c, textvariable=self.var_wind_speed, height=26, fg_color=COLOR_CARD).grid(row=1, column=0,
                                                                                                         sticky="ew",
                                                                                                         padx=5)
         ctk.CTkLabel(wv_frame_c, text="Откуда (°):", text_color=COLOR_TEXT_MUTED).grid(row=0, column=1, sticky="w",
@@ -969,20 +1297,14 @@ class UniversalBallisticStation:
 
         bw_frame_c = self.cal_wind_tabs.tab("Боковой")
         bw_frame_c.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(bw_frame_c, text="Азимут (°):", text_color=COLOR_TEXT_MUTED).grid(row=0, column=0, sticky="w",
+        ctk.CTkLabel(bw_frame_c, text="Снос (м/с):", text_color=COLOR_TEXT_MUTED).grid(row=0, column=0, sticky="w",
                                                                                        padx=10)
-        ctk.CTkEntry(bw_frame_c, textvariable=self.var_shoot_dir, height=26, fg_color=COLOR_CARD).grid(row=1, column=0,
-                                                                                                       sticky="ew",
-                                                                                                       padx=10,
-                                                                                                       pady=(0, 5))
-        ctk.CTkLabel(bw_frame_c, text="Снос (м/с):", text_color=COLOR_TEXT_MUTED).grid(row=2, column=0, sticky="w",
-                                                                                       padx=10)
-        ctk.CTkEntry(bw_frame_c, textvariable=self.var_crosswind, height=26, fg_color=COLOR_CARD).grid(row=3, column=0,
+        ctk.CTkEntry(bw_frame_c, textvariable=self.var_crosswind, height=26, fg_color=COLOR_CARD).grid(row=1, column=0,
                                                                                                        sticky="ew",
                                                                                                        padx=10,
                                                                                                        pady=(0, 5))
         rb_frame_c = ctk.CTkFrame(bw_frame_c, fg_color="transparent")
-        rb_frame_c.grid(row=4, column=0, sticky="ew", padx=10, pady=5)
+        rb_frame_c.grid(row=2, column=0, sticky="ew", padx=10, pady=5)
         ctk.CTkRadioButton(rb_frame_c, text="СЛЕВА →", variable=self.var_cross_dir, value="СЛЕВА →",
                            fg_color=COLOR_ACCENT, hover_color=COLOR_BORDER, text_color=COLOR_TEXT).pack(side="left",
                                                                                                         expand=True)
@@ -1042,14 +1364,14 @@ class UniversalBallisticStation:
             headwind = 0.0
 
             if active_wind == "Вектор ветра":
-                s_dir = float(self.var_shoot_dir.get().replace(',', '.'))
-                w_spd = float(self.var_wind_speed.get().replace(',', '.'))
-                w_dir = float(self.var_wind_dir.get().replace(',', '.'))
+                s_dir = self.safe_float(self.var_shoot_dir.get())
+                w_spd = self.safe_float(self.var_wind_speed.get())
+                w_dir = self.safe_float(self.var_wind_dir.get())
                 rel_angle = (w_dir - s_dir) % 360
                 crosswind = w_spd * math.sin(math.radians(rel_angle))
                 headwind = w_spd * math.cos(math.radians(rel_angle))
             elif active_wind == "Боковой":
-                cw_spd = float(self.var_crosswind.get().replace(',', '.'))
+                cw_spd = self.safe_float(self.var_crosswind.get())
                 crosswind = cw_spd if self.var_cross_dir.get() == "← СПРАВА" else -cw_spd
             else:
                 cw_str = self.var_kac_cross.get().replace(',', '.')
@@ -1249,6 +1571,7 @@ class UniversalBallisticStation:
         zero_dist = target["zero_dist"]
         delta_h = target["delta_h"]
         selected_weapon = target["weapon"]
+        target_azimuth = target.get("azimuth", 0.0)
         profile = self.profiles.get(selected_weapon, DEFAULT_PROFILES["M40A5 (.308 Win / M61)"])
 
         v0 = profile.get("v0", 850.0)
@@ -1266,8 +1589,9 @@ class UniversalBallisticStation:
         headwind = 0.0
         crosswind = 0.0
 
+        # Азимут на цель теперь берется из словаря самой цели (target_azimuth)
         if wind_params["tab"] == "Вектор ветра":
-            rel_angle = (wind_params["wind_dir"] - wind_params["shoot_dir"]) % 360
+            rel_angle = (wind_params["wind_dir"] - target_azimuth) % 360
             crosswind = wind_params["wind_speed"] * math.sin(math.radians(rel_angle))
             headwind = wind_params["wind_speed"] * math.cos(math.radians(rel_angle))
         elif wind_params["tab"] == "Боковой":
@@ -1344,7 +1668,7 @@ class UniversalBallisticStation:
         res = (
             f"{target_header}\n"
             f"{desc_text}"
-            f"Пересчет: {current_time} (Дистанция: {distance:.0f}м)\n"
+            f"Пересчет: {current_time} (Азимут: {target_azimuth:.0f}° | {distance:.0f}м)\n"
             f"─────────────────────────────\n"
             f"{selected_weapon.split(' ')[0]}\n"
             f"Пристрелка: {zero_dist:.0f}м | {angle_info}\n"
@@ -1395,9 +1719,7 @@ class UniversalBallisticStation:
             if selected_weapon not in self.profiles:
                 return
 
-            shoot_dir_str = self.var_shoot_dir.get().replace(',', '.')
-            current_azimuth = float(shoot_dir_str) if shoot_dir_str else 0.0
-
+            current_azimuth = self.safe_float(self.var_shoot_dir.get())
             target_desc = self.var_target_desc.get().strip()
 
             current_target = {
@@ -1405,46 +1727,34 @@ class UniversalBallisticStation:
                 "zero_dist": zero_dist,
                 "delta_h": delta_h,
                 "weapon": selected_weapon,
-                "description": target_desc
+                "description": target_desc,
+                "azimuth": current_azimuth
             }
 
-            try:
-                wind_params = self.get_wind_params()
-            except ValueError:
-                self.set_result_text("Ошибка ввода ветра!\nПроверьте, что в полях только цифры.")
-                return
-
+            wind_params = self.get_wind_params()
             logs = self.load_logs()
-
-            if logs:
-                base_azimuth = logs[0].get("base_azimuth", current_azimuth)
-                if self.angle_diff(current_azimuth, base_azimuth) > 10:
-                    logs = []
 
             # ЛОГИКА УНИКАЛЬНОСТИ ЦЕЛИ
             found = False
             for tgt in logs:
-                # Если введена пометка и она совпадает -> обновляем эту цель
+                # Если введена пометка и она совпадает -> обновляем эту цель полностью
                 if target_desc and tgt.get("description") == target_desc:
                     tgt["distance"] = distance
                     tgt["zero_dist"] = zero_dist
                     tgt["delta_h"] = delta_h
                     tgt["weapon"] = selected_weapon
+                    tgt["azimuth"] = current_azimuth
                     found = True
                     break
-                # Если пометка пустая, ищем точное совпадение по параметрам
+                # Если пометка пустая, ищем совпадение по всем параметрам
                 elif not target_desc and not tgt.get("description") and tgt["distance"] == distance and tgt[
-                    "delta_h"] == delta_h and tgt["weapon"] == selected_weapon:
+                    "delta_h"] == delta_h and tgt["weapon"] == selected_weapon and tgt.get(
+                    "azimuth") == current_azimuth:
                     found = True
                     break
 
             if not found:
-                current_target["base_azimuth"] = current_azimuth
                 logs.append(current_target)
-
-            for tgt in logs:
-                if "base_azimuth" not in tgt:
-                    tgt["base_azimuth"] = current_azimuth
 
             self.save_logs(logs)
             self.update_display(logs, wind_params, current_time)
