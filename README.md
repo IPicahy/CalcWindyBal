@@ -6,7 +6,7 @@ https://drive.google.com/file/d/1VLArIESnBEB9nlsPkFmqeRsDCen7ppyZ/view?usp=shari
 
 
 
-# Прицел под которую я делал калькулятор MK 4 ER/T M5A2 пристрелка всегда 100 м
+# Прицел под который рассчитан калькулятор MK 4 ER/T M5A2, пристрелка всегда 100 м
 
 ## Винтовки которые уже добавленны 
 1. M40A5
